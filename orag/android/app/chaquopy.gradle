@@ -1,0 +1,16 @@
+android {
+    defaultConfig {
+        ndk {
+            abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+        }
+
+        python {
+            buildPython "D:/Work/8th_Sem/venv/Scripts/python.exe"
+            pip {
+                install "numpy"
+                install "certifi"
+                install "huggingface_hub"
+            }
+        }
+    }
+}
