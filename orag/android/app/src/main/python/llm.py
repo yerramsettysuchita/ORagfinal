@@ -317,17 +317,18 @@ def _start_llama_server(model_path: str, n_ctx: int, n_threads: int,
             return True
         cmd = [
             str(exe),
-            "--model",         model_path,
-            "--ctx-size",      str(n_ctx),
-            "--threads",       str(n_threads),
+            "--model", model_path,
+            "--ctx-size", str(n_ctx),              # dynamic
+            "--threads", str(n_threads),           # dynamic
             "--threads-batch", str(n_threads),
-            "--port",          str(_LLAMASERVER_PORT),
-            "--host",          "127.0.0.1",
-            "--embedding",
-            "--flash-attn",    "on",
-            "--cache-type-k",  "q8_0",
-            "--cache-type-v",  "q8_0",
+            "--port", str(_LLAMASERVER_PORT),      # FIXED
+            "--host", "127.0.0.1",
+
+            # performance flags (important)
+            "--flash-attn", "on",
             "--cont-batching",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
         ]
         print(f"[llama-server] Starting: {cmd[0]}")
         print(f"  Model: {Path(model_path).name}")
@@ -536,45 +537,58 @@ def _gen_via_server(
         "temperature": temperature,
         "top_p":       top_p,
         "stream":      stream_cb is not None,
+        "stop":        ["<|im_end|>", "<|im_start|>", "</s>"],
     }).encode()
     url = f"http://127.0.0.1:{_LLAMASERVER_PORT}/completion"
+    print(f"[DEBUG] Sending request to: {url}")
+    print(f"[DEBUG] Prompt: {prompt[:100]}")
     req = urllib.request.Request(
         url, data=payload,
         headers={"Content-Type": "application/json"}, method="POST",
     )
-    try:
-        if stream_cb is not None:
-            full = ""
-            with urllib.request.urlopen(req) as resp:
-                for raw in resp:
-                    line = raw.decode("utf-8").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        token = json.loads(data).get("content", "")
-                        full += token
-                        stream_cb(token)
-                    except Exception:
-                        pass
-            return full
-        else:
-            with urllib.request.urlopen(req) as resp:
-                body = json.loads(resp.read())
-            return body.get("content", "")
-    except urllib.error.HTTPError as e:
-        # Read the server's error body so we can show a meaningful message
+    for attempt in range(2):
         try:
-            err_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            err_body = "(no response body)"
-        raise RuntimeError(
-            f"llama-server HTTP {e.code}: {err_body[:300]}"
-        ) from e
-    except OSError as e:
-        raise RuntimeError(f"llama-server unreachable: {e}") from e
+            if stream_cb is not None:
+                full = ""
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    import api
+                    for raw in resp:
+                        if getattr(api, "_stop_flag", False):
+                            print("[LLM] Stream stopped by user")
+                            break
+                        line = raw.decode("utf-8").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            token = json.loads(data).get("content", "")
+                            full += token
+                            stream_cb(token)
+                        except Exception:
+                            pass
+                return full
+            else:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    body = json.loads(resp.read())
+                return body.get("content", "")
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = "(no response body)"
+            if attempt == 1:
+                raise RuntimeError(f"llama-server HTTP {e.code}: {err_body[:300]}") from e
+        except OSError as e:
+            if attempt == 1:
+                raise RuntimeError(f"llama-server unreachable: {e}") from e
+        
+        # Give it a tiny bit of breathing room before second try
+        import time
+        time.sleep(1)
+        
+    return ""
 
 
 # ------------------------------------------------------------------ #
@@ -998,7 +1012,7 @@ def build_direct_prompt(
         "Answer the user's question directly and completely. "
         "Write at least 2-3 sentences. "
         "Do NOT just repeat the question or echo back one word. "
-        "Reply with only your final answer â€” no reasoning steps."
+        "Reply with only your final answer — no reasoning steps."
     )
     # Append compressed older context to system message so it takes fewer
     # tokens than full ChatML turns but still informs the model.

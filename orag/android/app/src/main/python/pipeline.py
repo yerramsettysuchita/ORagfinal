@@ -245,7 +245,18 @@ def chat_direct(
             result = (False, "No LLM model loaded. Please load a GGUF model first.")
         else:
             prompt = build_direct_prompt(question, history, summary)
-            answer = runtime.generate(prompt, stream_cb=stream_cb).strip()
+            
+            # Simple debug logger to show that generation is actually happening
+            def _debug_stream(token: str):
+                import sys
+                sys.stdout.write(token)
+                sys.stdout.flush()
+                if stream_cb:
+                    stream_cb(token)
+                    
+            print("[DEBUG] Generation started...")
+            answer = runtime.generate(prompt, stream_cb=_debug_stream).strip()
+            print("\n[DEBUG] Generation finished.")
             result = (True, answer)
     except Exception as exc:
         result = (False, f"Error during inference: {exc}")
