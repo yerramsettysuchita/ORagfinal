@@ -31,11 +31,25 @@ android {
         versionName = flutter.versionName
     }
 
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    // Force extraction of native .so files to filesystem at install time.
+    // Required because llama-server is executed via subprocess, not loaded via dlopen.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }

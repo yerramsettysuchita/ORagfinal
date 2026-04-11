@@ -76,12 +76,28 @@ def register_auto_download_callbacks(
 
 
 def init(model_path: Optional[str] = None) -> None:
-    """Call once at app start: set up DB + retriever + model bootstrap."""
+    print("[INIT] Starting initialization...")
+
     if model_path:
         set_model_dir(model_path)
+
     init_db()
     retriever.reload()
+
+    # Step 1: Ensure models are downloaded
     auto_download_default_sync()
+
+    # Step 2: Load Qwen model into runtime
+    qwen_path = model_dest_path("qwen2.5-1.5b-instruct-compressed.gguf")
+
+    print("[INIT] Loading model via runtime...")
+
+    try:
+        runtime.load(qwen_path)
+        print("[INIT] Model loaded successfully.")
+    except Exception as e:
+        print(f"[INIT] Model loading failed: {e}")
+        raise
 
 
 def _start_auto_download() -> None:

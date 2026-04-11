@@ -1,4 +1,4 @@
-﻿"""
+"""
 llm.py â€” LLM backend with automatic three-step fallback.
 
 Priority order:
@@ -32,6 +32,50 @@ from config import NOMIC_SERVER_PORT, QWEN_SERVER_PORT
 
 # App root: rag/llm.py â†’ ../..
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# ------------------------------------------------------------------ #
+#  Android detection                                                   #
+# ------------------------------------------------------------------ #
+
+# Paths injected from Kotlin (MainActivity) before Python init runs.
+# mActivity is not accessible from Chaquopy in Flutter's threading model,
+# so these are the single source of truth on Android.
+_ANDROID_NATIVE_LIB_DIR: Optional[str] = None
+_ANDROID_FILES_DIR: Optional[str] = None
+
+
+def set_android_paths(native_lib_dir: str, files_dir: str) -> None:
+    """Called from Kotlin to inject Android-specific paths before init."""
+    global _ANDROID_NATIVE_LIB_DIR, _ANDROID_FILES_DIR
+    _ANDROID_NATIVE_LIB_DIR = native_lib_dir
+    _ANDROID_FILES_DIR = files_dir
+    print(f"[llm] Android paths injected: native_lib={native_lib_dir}, files={files_dir}")
+
+
+def _is_android() -> bool:
+    """Reliably detect Android runtime via multiple indicators."""
+    if _ANDROID_NATIVE_LIB_DIR is not None:
+        return True
+    if os.environ.get("ANDROID_PRIVATE"):
+        return True
+    try:
+        if os.path.isfile("/system/build.prop"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _android_private_dir() -> str:
+    """Return the best available private directory for the app on Android."""
+    if _ANDROID_FILES_DIR:
+        return _ANDROID_FILES_DIR
+    priv = os.environ.get("ANDROID_PRIVATE", "")
+    if priv:
+        return priv
+    return ""
+
+
 
 # ------------------------------------------------------------------ #
 #  Backend helpers                                                     #
@@ -97,7 +141,8 @@ def _ensure_android_binary() -> Optional[str]:
     """
     Android-specific: locate the bundled ARM64 llama-server binary.
 
-    The binary is bundled as lib/arm64-v8a/libllama_server.so in the APK.
+    The binary is bundled as lib/arm64-v8a/llama-server.so (or legacy
+    libllama_server.so) in the APK.
     Android's package installer extracts all .so files from lib/<abi>/ to
     the app's nativeLibraryDir at install time with correct SELinux labels
     that allow execve() â€” the ONLY reliable way to run native code on
@@ -109,50 +154,57 @@ def _ensure_android_binary() -> Optional[str]:
     if _ANDROID_EXE_PATH is not None:
         return _ANDROID_EXE_PATH
 
-    if not os.environ.get("ANDROID_PRIVATE"):
+    if not _is_android():
         return None
 
-    priv = os.environ.get("ANDROID_PRIVATE", "")
+    priv = _android_private_dir()
     dbg: list[str] = [f"ANDROID_PRIVATE={priv}"]
+    print(f"[llama-server] _is_android()=True, priv={priv}")
 
-    # Primary: nativeLibraryDir â€” set by Android package manager at install time
-    native_lib_dir: Optional[str] = None
-    try:
-        from android import mActivity  # type: ignore
-        native_lib_dir = str(mActivity.getApplicationInfo().nativeLibraryDir)
-        dbg.append(f"nativeLibraryDir={native_lib_dir}")
-    except Exception as e:
-        dbg.append(f"getApplicationInfo failed: {e}")
+    # Primary: use path injected from Kotlin (most reliable)
+    native_lib_dir: Optional[str] = _ANDROID_NATIVE_LIB_DIR
+    if native_lib_dir:
+        dbg.append(f"nativeLibraryDir (from Kotlin)={native_lib_dir}")
+    else:
+        # Fallback: try mActivity (may not work in Flutter threading context)
+        try:
+            from android import mActivity  # type: ignore
+            native_lib_dir = str(mActivity.getApplicationInfo().nativeLibraryDir)
+            dbg.append(f"nativeLibraryDir (from mActivity)={native_lib_dir}")
+        except Exception as e:
+            dbg.append(f"getApplicationInfo failed: {e}")
 
     if native_lib_dir:
-        exe = os.path.join(native_lib_dir, "libllama_server.so")
-        dbg.append(f"checking {exe}")
-        if os.path.isfile(exe):
-            sz = os.path.getsize(exe)
-            dbg.append(f"FOUND: {sz // 1024} KB")
-            print(f"[llama-server] native lib: {exe} ({sz // 1024} KB)")
-            # Write debug info to app private storage
-            try:
-                Path(priv, "llama_debug.txt").write_text("\n".join(dbg))
-            except Exception:
-                pass
-            _ANDROID_EXE_PATH = exe
-            return exe
-        else:
-            # List what IS in nativeLibraryDir so we can diagnose wrong names
-            try:
-                present = os.listdir(native_lib_dir)
-                dbg.append(f"NOT FOUND. nativeLibraryDir contains: {present}")
-                _ANDROID_BINARY_ERROR = (
-                    f"libllama_server.so not found in {native_lib_dir}.\n"
-                    f"Directory contains: {present}"
-                )
-            except Exception as le:
-                dbg.append(f"listdir failed: {le}")
-                _ANDROID_BINARY_ERROR = (
-                    f"libllama_server.so not found in {native_lib_dir} "
-                    f"(listdir failed: {le})"
-                )
+        candidates = ["llama-server.so", "libllama_server.so"]
+        for name in candidates:
+            exe = os.path.join(native_lib_dir, name)
+            dbg.append(f"checking {exe}")
+            if os.path.isfile(exe):
+                sz = os.path.getsize(exe)
+                dbg.append(f"FOUND: {name} ({sz // 1024} KB)")
+                print(f"[llama-server] native lib: {exe} ({sz // 1024} KB)")
+                try:
+                    Path(priv, "llama_debug.txt").write_text("\n".join(dbg))
+                except Exception:
+                    pass
+                _ANDROID_EXE_PATH = exe
+                return exe
+
+        # List what IS in nativeLibraryDir so we can diagnose wrong names
+        try:
+            present = os.listdir(native_lib_dir)
+            dbg.append(f"NOT FOUND. nativeLibraryDir contains: {present}")
+            _ANDROID_BINARY_ERROR = (
+                f"No llama server binary found in {native_lib_dir}.\n"
+                f"Expected one of: {candidates}\n"
+                f"Directory contains: {present}"
+            )
+        except Exception as le:
+            dbg.append(f"listdir failed: {le}")
+            _ANDROID_BINARY_ERROR = (
+                f"No llama server binary found in {native_lib_dir} "
+                f"(listdir failed: {le})"
+            )
     else:
         _ANDROID_BINARY_ERROR = "Could not determine nativeLibraryDir"
 
@@ -165,8 +217,8 @@ def _ensure_android_binary() -> Optional[str]:
 
 
 def _server_exe():
-    # 1. Android: use bundled ARM64 binary deployed to codeCacheDir
-    if os.environ.get("ANDROID_PRIVATE"):
+    # 1. Android: use bundled ARM64 binary from nativeLibraryDir
+    if _is_android():
         return _ensure_android_binary()  # returns str path or None
 
     # 2. Desktop: look in llamacpp_bin/ dir
@@ -177,7 +229,7 @@ def _server_exe():
 
 
 def _extract_zip_if_needed() -> bool:
-    if os.environ.get("ANDROID_PRIVATE"):
+    if _is_android():
         return _server_exe() is not None   # on Android, skip ZIP handling
     if _server_exe() is not None:
         return True
@@ -284,7 +336,7 @@ def _start_llama_server(model_path: str, n_ctx: int, n_threads: int,
             on_progress(0.02, f"Starting AI engine\u2026 ({Path(model_path).name})")
         cf = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         log_file = None
-        priv = os.environ.get("ANDROID_PRIVATE", "")
+        priv = _android_private_dir()
         if priv:
             try:
                 log_path = os.path.join(priv, "llama_server.log")
@@ -307,7 +359,7 @@ def _start_llama_server(model_path: str, n_ctx: int, n_threads: int,
     ready = _wait_for_server(_LLAMASERVER_PORT, timeout=180, on_tick=on_progress)
     if not ready:
         _stop_llama_server()
-        priv = os.environ.get("ANDROID_PRIVATE", "")
+        priv = _android_private_dir()
         if priv:
             try:
                 log_path = os.path.join(priv, "llama_server.log")
@@ -365,7 +417,7 @@ def start_nomic_server(model_path: str,
         print(f"  Model: {Path(model_path).name}")
         cf = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         log_file = None
-        priv = os.environ.get("ANDROID_PRIVATE", "")
+        priv = _android_private_dir()
         if priv:
             try:
                 log_file = open(os.path.join(priv, "nomic_server.log"), "wb")
@@ -555,7 +607,7 @@ def _android_package_name_from_private() -> Optional[str]:
     # /data/user/0/<package>
     # /data/user/0/<package>/files
     # /data/data/<package>
-    raw = os.environ.get("ANDROID_PRIVATE", "")
+    raw = _android_private_dir()
     parts = [p for p in raw.split("/") if p]
     if len(parts) >= 4 and parts[0] == "data" and parts[1] in {"user", "data"}:
         if parts[1] == "user" and len(parts) >= 5:
@@ -575,7 +627,7 @@ def _android_app_external_models_dir_direct() -> Optional[str]:
 
 def _models_dir() -> str:
     # Option 1: prefer app-specific external storage, then fallback to internal.
-    if os.environ.get("ANDROID_PRIVATE"):
+    if _is_android():
         direct_ext = _ensure_writable_dir(_android_app_external_models_dir_direct())
         if direct_ext:
             return direct_ext
@@ -591,7 +643,7 @@ def _models_dir() -> str:
         except Exception:
             pass
 
-    base = os.environ.get("ANDROID_PRIVATE", os.path.expanduser("~"))
+    base = _android_private_dir() or os.path.expanduser("~")
     return os.path.join(base, "models")
 
 
@@ -672,12 +724,12 @@ class LlamaCppModel:
                 print("[LLM] Backend: llama-server (built-in)")
                 return
 
-            if os.environ.get("ANDROID_PRIVATE"):
+            if _is_android():
                 detail = _ANDROID_BINARY_ERROR or "unknown error"
                 raise RuntimeError(
                     f"No LLM backend available.\n\n"
                     f"Binary extraction failed: {detail}\n\n"
-                    f"Debug log: $ANDROID_PRIVATE/llama_debug.txt"
+                    f"Debug log: {_android_private_dir()}/llama_debug.txt"
                 )
             raise RuntimeError(
                 "No LLM backend available.\n\n"

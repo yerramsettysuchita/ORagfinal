@@ -20,6 +20,20 @@ class MainActivity : FlutterActivity() {
 			if (!Python.isStarted()) {
 				Python.start(AndroidPlatform(this))
 			}
+
+			// Inject Android paths into llm module before any init runs.
+			// mActivity is not accessible from Python in this Flutter/Chaquopy
+			// context, so we push nativeLibraryDir from Kotlin directly.
+			try {
+				val llm = Python.getInstance().getModule("llm")
+				val nativeLibDir = applicationInfo.nativeLibraryDir
+				val filesDir = filesDir.absolutePath
+				llm.callAttr("set_android_paths", nativeLibDir, filesDir)
+				Log.i("ORAG", "Injected nativeLibraryDir=$nativeLibDir, filesDir=$filesDir")
+			} catch (e: Exception) {
+				Log.w("ORAG", "Failed to inject Android paths", e)
+			}
+
 			val module = Python.getInstance().getModule("api")
 			apiModule = module
 			return module
