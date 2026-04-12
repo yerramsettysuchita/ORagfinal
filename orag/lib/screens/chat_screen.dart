@@ -9,6 +9,7 @@ import '../widgets/chat_bubble.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/document_drawer.dart';
 import '../widgets/init_overlay.dart';
+import 'settings_screen.dart';
 import '../widgets/source_card.dart';
 import '../widgets/typing_indicator.dart';
 
@@ -244,43 +245,28 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _clearMemory() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('Clear conversation?',
-            style: TextStyle(color: AppColors.textPrimary)),
-        content: const Text(
-          'This will clear all messages and conversation memory.',
-          style: TextStyle(color: AppColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Clear',
-                style: TextStyle(color: AppColors.error)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed == true) {
-      try {
-        await _platform.clearMemory();
-        setState(() => _messages.clear());
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to clear: $e')),
-          );
-        }
+    try {
+      await _platform.clearMemory();
+      setState(() => _messages.clear());
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to clear: $e')),
+        );
       }
     }
+  }
+
+  void _openSettings() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          platform: _platform,
+          onClearChat: _clearMemory,
+        ),
+      ),
+    );
   }
 
   void _scrollToBottom() {
@@ -401,12 +387,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             color: AppColors.textSecondary,
           ),
 
-          // Clear button
+          // Settings button
           IconButton(
-            icon: const Icon(Icons.delete_outline_rounded, size: 21),
-            tooltip: 'Clear conversation',
-            onPressed:
-                (_isGenerating || _messages.isEmpty) ? null : _clearMemory,
+            icon: const Icon(Icons.settings_outlined, size: 21),
+            tooltip: 'Settings',
+            onPressed: _openSettings,
             color: AppColors.textSecondary,
           ),
         ],

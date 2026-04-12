@@ -294,6 +294,16 @@ class MainActivity : FlutterActivity() {
 						}
 					}.start()
 
+					} else if (call.method == "getEngineHealth") {
+					Thread {
+						try {
+							val response = ensureApiModule().callAttr("get_engine_health")
+							runOnUiThread { result.success(response.toString()) }
+						} catch (e: Exception) {
+							runOnUiThread { result.error("ERROR", e.message, null) }
+						}
+					}.start()
+
 				} else {
 					result.notImplemented()
 				}

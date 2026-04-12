@@ -369,3 +369,42 @@ def ask_rag(query, token_callback):
         return json.dumps({"answer": f"ERROR: {str(e)}", "sources": []})
     finally:
         _is_generating = False
+
+
+# ------------------------------------------------------------------ #
+#  Engine health                                                       #
+# ------------------------------------------------------------------ #
+
+def get_engine_health():
+    """Return JSON with model/server health info for the settings screen."""
+    try:
+        from pipeline import runtime, retriever
+        from runtime.model_runtime import LlamaModelRuntime
+
+        health = {
+            "model_loaded": runtime.is_loaded(),
+            "model_name": "",
+            "backend": "",
+            "qwen_ready": False,
+            "nomic_ready": False,
+            "doc_count": 0,
+            "chunk_count": 0,
+        }
+
+        if isinstance(runtime, LlamaModelRuntime):
+            h = runtime.health()
+            health["qwen_ready"] = h.qwen_ready
+            health["nomic_ready"] = h.nomic_ready
+            health["backend"] = h.backend
+            health["model_name"] = h.model_path.split("/")[-1] if h.model_path else ""
+
+        try:
+            docs = pipeline_list_docs()
+            health["doc_count"] = len(docs)
+            health["chunk_count"] = sum(d.get("num_chunks", 0) for d in docs)
+        except Exception:
+            pass
+
+        return json.dumps(health)
+    except Exception as e:
+        return json.dumps({"error": str(e)})

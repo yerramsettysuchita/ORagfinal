@@ -246,6 +246,18 @@ class PlatformService {
     return (tokens: tokenController.stream, result: resultCompleter.future);
   }
 
+  // ---- Engine health ----
+
+  /// Get engine health info for settings screen.
+  Future<Map<String, dynamic>> getEngineHealth() async {
+    try {
+      final result = await _method.invokeMethod('getEngineHealth');
+      return jsonDecode(result as String) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
   // ---- Helpers ----
 
   static InitState _parseState(String s) {
