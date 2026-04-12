@@ -253,3 +253,10 @@ class HybridRetriever:
             idx = x[0]
             txt = self._chunks[idx]["text"].strip()
             if txt in seen_texts:
+                continue
+            seen_texts.add(txt)
+            top.append((txt, x[1], self._chunks[idx]["doc_id"]))
+            if len(top) >= top_k:
+                break
+        
+        return top
