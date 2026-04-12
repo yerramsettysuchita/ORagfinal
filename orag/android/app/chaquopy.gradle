@@ -10,6 +10,7 @@ android {
                 install "numpy"
                 install "certifi"
                 install "huggingface_hub"
+                install "pypdf"
             }
         }
     }

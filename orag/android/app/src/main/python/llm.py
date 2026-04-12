@@ -466,16 +466,21 @@ def stop_nomic_server() -> None:
 
 def get_embedding(text: str) -> "list[float] | None":
     """
-    Get a dense embedding vector for *text* via the Nomic llama-server
-    running on port 8083.  Falls back to the generation server (port 8082)
-    if the Nomic server is not running.
-    Returns None if neither server is available.
+    Get a dense embedding vector for *text* via the DEDICATED Nomic
+    llama-server running on the Nomic port.
+
+    IMPORTANT: Do NOT fall back to the Qwen generation server.
+    Qwen is a chat model — its /embedding endpoint returns garbage
+    vectors that poison retrieval scores and cause hallucinated answers.
+
+    Returns None if the Nomic server is not available.
     """
-    # Prefer dedicated Nomic server; fall back to generation server
+    # ONLY use the dedicated Nomic embedding server
     if _NOMIC_PROC is not None and _NOMIC_PROC.poll() is None:
         port = _NOMIC_PORT
-    elif _LLAMASERVER_PROC is not None:
-        port = _LLAMASERVER_PORT
+    elif _probe_port(_NOMIC_PORT):
+        # Service-owned process on the Nomic port
+        port = _NOMIC_PORT
     else:
         return None
     import urllib.request

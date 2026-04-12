@@ -1,5 +1,12 @@
-from pipeline import init, chat_direct, get_bootstrap_event, is_model_loaded
-from pipeline import register_auto_download_callbacks
+from pipeline import (
+    init, chat_direct, get_bootstrap_event, is_model_loaded,
+    register_auto_download_callbacks,
+    ingest_document as pipeline_ingest,
+    list_documents as pipeline_list_docs,
+    delete_document_by_id as pipeline_delete_doc,
+    clear_all_documents as pipeline_clear_docs,
+    ask as pipeline_ask,
+)
 from downloader import set_model_dir, auto_download_default, model_dest_path, QWEN_MODEL
 from runtime.bootstrap import BootstrapState
 import threading
@@ -58,9 +65,10 @@ def stop_generation():
 def wait_for_server():
     import urllib.request
     import time
+    from config import QWEN_SERVER_PORT
     for _ in range(10):
         try:
-            r = urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2)
+            r = urllib.request.urlopen(f"http://127.0.0.1:{QWEN_SERVER_PORT}/health", timeout=2)
             if r.getcode() == 200:
                 return True
         except Exception:
@@ -148,6 +156,15 @@ def init_with_progress(model_path, progress_callback):
                     _emit_progress("loading", frac, text)
 
                 runtime.load(qwen_path, on_progress=on_load_progress)
+
+            # Step 3: Start Nomic for RAG semantic search
+            from downloader import NOMIC_MODEL
+            nomic_path = model_dest_path(NOMIC_MODEL["filename"])
+            import os
+            from runtime.model_runtime import LlamaModelRuntime
+            if os.path.isfile(nomic_path) and isinstance(runtime, LlamaModelRuntime):
+                _emit_progress("loading", 0.95, "Starting embedding engine…")
+                runtime.start_nomic_server_if_needed(nomic_path)
 
             _initialized = True
             _emit_progress("ready", 1.0, "AI engine ready!")
@@ -257,5 +274,98 @@ def chat_stream(query, token_callback):
 
     except Exception as e:
         return f"ERROR: {str(e)}"
+    finally:
+        _is_generating = False
+
+
+# ------------------------------------------------------------------ #
+#  Document management                                                 #
+# ------------------------------------------------------------------ #
+
+def upload_document(file_path):
+    """Ingest a PDF/TXT document into the RAG pipeline.
+    Returns JSON: {"success": true/false, "message": "..."}
+
+    NOTE: pipeline.ingest_document() handles resolve_uri internally,
+    so we pass the raw file_path (which may be a content:// URI).
+    """
+    try:
+        ok, msg = pipeline_ingest(file_path)
+        return json.dumps({"success": ok, "message": msg})
+    except Exception as e:
+        return json.dumps({"success": False, "message": f"Error: {e}"})
+
+
+def list_docs():
+    """Return JSON array of ingested documents.
+    Each doc: {"id": int, "name": str, "num_chunks": int, "added_at": str}
+    """
+    try:
+        docs = pipeline_list_docs()
+        return json.dumps(docs)
+    except Exception as e:
+        return json.dumps([])
+
+
+def delete_doc(doc_id):
+    """Delete a document by ID. Returns JSON status."""
+    try:
+        pipeline_delete_doc(int(doc_id))
+        return json.dumps({"success": True, "message": "Document deleted."})
+    except Exception as e:
+        return json.dumps({"success": False, "message": f"Error: {e}"})
+
+
+def clear_docs():
+    """Clear all documents. Returns JSON status."""
+    try:
+        pipeline_clear_docs()
+        return json.dumps({"success": True, "message": "All documents cleared."})
+    except Exception as e:
+        return json.dumps({"success": False, "message": f"Error: {e}"})
+
+
+# ------------------------------------------------------------------ #
+#  RAG streaming query                                                 #
+# ------------------------------------------------------------------ #
+
+def ask_rag(query, token_callback):
+    """RAG streaming query with source attribution.
+
+    Streams tokens via token_callback, returns JSON with answer + sources:
+    {"answer": "...", "sources": [{"doc_name": "...", "chunk_text": "...", "score": 0.85}]}
+    """
+    global _is_generating, _stop_flag
+
+    if _is_generating:
+        return json.dumps({"answer": "Please wait, processing previous request...", "sources": []})
+
+    _is_generating = True
+    _stop_flag = False
+    print("[RAG-STREAM] Request started")
+
+    try:
+        ensure_ready()
+        wait_for_server()
+
+        def _on_token(token):
+            try:
+                token_callback.invoke(token)
+            except Exception as e:
+                print(f"[RAG-STREAM] callback error: {e}")
+
+        ok, response, sources = pipeline_ask(
+            question=query,
+            stream_cb=_on_token,
+        )
+
+        print("[RAG-STREAM] Response received")
+        return json.dumps({
+            "answer": response if ok else f"ERROR: {response}",
+            "sources": sources,
+        })
+
+    except Exception as e:
+        return json.dumps({"answer": f"ERROR: {str(e)}", "sources": []})
     finally:
         _is_generating = False

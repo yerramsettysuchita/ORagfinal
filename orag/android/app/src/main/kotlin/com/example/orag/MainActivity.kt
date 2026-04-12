@@ -213,7 +213,7 @@ class MainActivity : FlutterActivity() {
 							}
 						}
 					}.start()
-				} else if (call.method == "clearMemory") {
+					} else if (call.method == "clearMemory") {
 					Thread {
 						try {
 							ensureApiModule().callAttr("clear_memory")
@@ -224,6 +224,76 @@ class MainActivity : FlutterActivity() {
 							}
 						}
 					}.start()
+
+				// ---- Document management ----
+
+				} else if (call.method == "uploadDocument") {
+					val filePath = call.argument<String>("file_path") ?: ""
+					Thread {
+						try {
+							val response = ensureApiModule().callAttr("upload_document", filePath)
+							runOnUiThread { result.success(response.toString()) }
+						} catch (e: Exception) {
+							runOnUiThread { result.error("ERROR", e.message, null) }
+							Log.e("ORAG", "uploadDocument failed", e)
+						}
+					}.start()
+
+				} else if (call.method == "listDocuments") {
+					Thread {
+						try {
+							val response = ensureApiModule().callAttr("list_docs")
+							runOnUiThread { result.success(response.toString()) }
+						} catch (e: Exception) {
+							runOnUiThread { result.error("ERROR", e.message, null) }
+						}
+					}.start()
+
+				} else if (call.method == "deleteDocument") {
+					val docId = call.argument<Int>("doc_id") ?: 0
+					Thread {
+						try {
+							val response = ensureApiModule().callAttr("delete_doc", docId)
+							runOnUiThread { result.success(response.toString()) }
+						} catch (e: Exception) {
+							runOnUiThread { result.error("ERROR", e.message, null) }
+						}
+					}.start()
+
+				} else if (call.method == "clearDocuments") {
+					Thread {
+						try {
+							val response = ensureApiModule().callAttr("clear_docs")
+							runOnUiThread { result.success(response.toString()) }
+						} catch (e: Exception) {
+							runOnUiThread { result.error("ERROR", e.message, null) }
+						}
+					}.start()
+
+				// ---- RAG streaming ----
+
+				} else if (call.method == "ragStream") {
+					val query = call.argument<String>("query") ?: ""
+					Thread {
+						try {
+							val api = ensureApiModule()
+							val response = api.callAttr(
+								"ask_rag", query, this@MainActivity::onStreamToken
+							)
+							runOnUiThread {
+								streamSink?.success("__STREAM_END__")
+								// response is JSON with answer + sources
+								result.success(response.toString())
+							}
+						} catch (e: Exception) {
+							runOnUiThread {
+								streamSink?.success("__STREAM_END__")
+								result.error("ERROR", e.message, null)
+							}
+							Log.e("ORAG", "ragStream failed", e)
+						}
+					}.start()
+
 				} else {
 					result.notImplemented()
 				}

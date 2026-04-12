@@ -149,6 +149,103 @@ class PlatformService {
     await _method.invokeMethod('clearMemory');
   }
 
+  // ---- Documents ----
+
+  /// Upload a document (PDF/TXT) for RAG ingestion.
+  /// Returns {success: bool, message: String}
+  Future<Map<String, dynamic>> uploadDocument(String filePath) async {
+    try {
+      final result = await _method.invokeMethod(
+        'uploadDocument',
+        {'file_path': filePath},
+      );
+      return jsonDecode(result as String) as Map<String, dynamic>;
+    } catch (e) {
+      return {'success': false, 'message': 'Upload failed: $e'};
+    }
+  }
+
+  /// List all ingested documents.
+  Future<List<Map<String, dynamic>>> listDocuments() async {
+    try {
+      final result = await _method.invokeMethod('listDocuments');
+      final list = jsonDecode(result as String) as List;
+      return list.cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Delete a document by ID.
+  Future<bool> deleteDocument(int docId) async {
+    try {
+      final result = await _method.invokeMethod(
+        'deleteDocument',
+        {'doc_id': docId},
+      );
+      final json = jsonDecode(result as String) as Map<String, dynamic>;
+      return json['success'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Clear all documents.
+  Future<bool> clearDocuments() async {
+    try {
+      final result = await _method.invokeMethod('clearDocuments');
+      final json = jsonDecode(result as String) as Map<String, dynamic>;
+      return json['success'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---- RAG query ----
+
+  /// Start a RAG streaming query. Streams tokens, then returns sources via
+  /// the MethodChannel result (JSON with answer + sources).
+  /// Returns a record of (tokenStream, sourcesFuture).
+  ({Stream<String> tokens, Future<Map<String, dynamic>> result}) ragStream(String query) {
+    final tokenController = StreamController<String>();
+    final resultCompleter = Completer<Map<String, dynamic>>();
+
+    StreamSubscription? sub;
+    sub = _streamChannel.receiveBroadcastStream().listen(
+      (event) {
+        final token = event.toString();
+        if (token == '__STREAM_END__') {
+          sub?.cancel();
+          tokenController.close();
+        } else {
+          tokenController.add(token);
+        }
+      },
+      onError: (error) {
+        tokenController.addError(error);
+        tokenController.close();
+      },
+    );
+
+    // Invoke ragStream — the result contains sources JSON
+    _method.invokeMethod('ragStream', {'query': query}).then((result) {
+      try {
+        final json = jsonDecode(result as String) as Map<String, dynamic>;
+        resultCompleter.complete(json);
+      } catch (e) {
+        resultCompleter.complete({});
+      }
+    }).catchError((e) {
+      if (!tokenController.isClosed) {
+        tokenController.addError(e);
+        tokenController.close();
+      }
+      resultCompleter.complete({});
+    });
+
+    return (tokens: tokenController.stream, result: resultCompleter.future);
+  }
+
   // ---- Helpers ----
 
   static InitState _parseState(String s) {
@@ -166,3 +263,4 @@ class PlatformService {
     }
   }
 }
+

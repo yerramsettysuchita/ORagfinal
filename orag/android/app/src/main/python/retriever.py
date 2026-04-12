@@ -1,4 +1,4 @@
-﻿"""
+"""
 retriever.py â€” Hybrid BM25 + TF-IDF + Semantic retriever.
 
 * BM25     : classic probabilistic keyword ranking (no deps).
@@ -209,9 +209,9 @@ class HybridRetriever:
 
     # --- public query ---
 
-    def query(self, text: str, top_k: int = 4) -> List[Tuple[str, float]]:
+    def query(self, text: str, top_k: int = 4) -> List[Tuple[str, float, int]]:
         """
-        Returns list of (chunk_text, score) sorted by relevance, top_k results.
+        Returns list of (chunk_text, score, doc_id) sorted by relevance, top_k results.
         Uses semantic embeddings when available (best quality), otherwise
         falls back to pure BM25 + TF-IDF hybrid.
         """
@@ -219,15 +219,17 @@ class HybridRetriever:
             return []
 
         q_tokens = tokenise(text)
-        if not q_tokens:
+        sem = self._semantic_scores(text)
+
+        if not q_tokens and sem is None:
+            # No keyword match possible, and no semantic embeddings available
             return []
 
-        bm25 = self._bm25_scores(q_tokens)
-        cos  = self._cosine_scores(q_tokens)
-        sem  = self._semantic_scores(text)
+        bm25 = self._bm25_scores(q_tokens) if q_tokens else [0.0] * len(self._chunks)
+        cos  = self._cosine_scores(q_tokens) if q_tokens else [0.0] * len(self._chunks)
 
-        bm25_n = _normalise_scores(bm25)
-        cos_n  = _normalise_scores(cos)
+        bm25_n = _normalise_scores(bm25) if q_tokens else [0.0] * len(self._chunks)
+        cos_n  = _normalise_scores(cos) if q_tokens else [0.0] * len(self._chunks)
 
         if sem is not None:
             sem_n = _normalise_scores(sem)
@@ -244,10 +246,10 @@ class HybridRetriever:
             ]
 
         combined.sort(key=lambda x: x[1], reverse=True)
-        top = combined[:top_k]
-
-        return [
-            (self._chunks[i]["text"], score)
-            for i, score in top
-        ]
-
+        
+        seen_texts = set()
+        top = []
+        for x in combined:
+            idx = x[0]
+            txt = self._chunks[idx]["text"].strip()
+            if txt in seen_texts:
