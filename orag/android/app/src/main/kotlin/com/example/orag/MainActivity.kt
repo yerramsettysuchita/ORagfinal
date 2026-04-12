@@ -147,6 +147,17 @@ class MainActivity : FlutterActivity() {
 							}
 						}
 					}.start()
+				} else if (call.method == "clearMemory") {
+					Thread {
+						try {
+							ensureApiModule().callAttr("clear_memory")
+							runOnUiThread { result.success(true) }
+						} catch (e: Exception) {
+							runOnUiThread {
+								result.error("ERROR", e.message, null)
+							}
+						}
+					}.start()
 				} else {
 					result.notImplemented()
 				}

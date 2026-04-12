@@ -150,10 +150,33 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _clearMemory() async {
+    try {
+      await platform.invokeMethod('clearMemory');
+      setState(() {
+        messages.clear();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Memory cleared')),
+      );
+    } catch (e) {
+      debugPrint("Failed to clear memory: $e");
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('O-RAG')),
+      appBar: AppBar(
+        title: const Text('O-RAG'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: 'Clear Memory',
+            onPressed: isLoading ? null : _clearMemory,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(

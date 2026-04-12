@@ -5,6 +5,17 @@ _initialized = False
 _init_lock = threading.Lock()
 _is_generating = False
 _stop_flag = False
+_conversation_history = []
+MAX_TURNS = 5
+
+def trim_history():
+    global _conversation_history
+    if len(_conversation_history) > MAX_TURNS:
+        _conversation_history = _conversation_history[-MAX_TURNS:]
+
+def clear_memory():
+    global _conversation_history
+    _conversation_history = []
 
 def stop_generation():
     global _stop_flag
@@ -50,12 +61,16 @@ def chat(query):
     try:
         ensure_ready()
         wait_for_server()
+        trim_history()
 
         ok, response = chat_direct(
             question=query,
-            history=[],
+            history=_conversation_history,
             summary=""
         )
+
+        if ok:
+            _conversation_history.append((query, response))
 
         print("[CHAT] Response received")
         return response if ok else f"ERROR: {response}"
@@ -95,12 +110,16 @@ def chat_stream(query, token_callback):
             except Exception as e:
                 print(f"[CHAT-STREAM] callback error: {e}")
 
+        trim_history()
         ok, response = chat_direct(
             question=query,
-            history=[],
+            history=_conversation_history,
             summary="",
             stream_cb=_on_token,
         )
+
+        if ok:
+            _conversation_history.append((query, response))
 
         print("[CHAT-STREAM] Response received")
         return response if ok else f"ERROR: {response}"
