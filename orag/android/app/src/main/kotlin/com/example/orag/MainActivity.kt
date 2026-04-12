@@ -12,12 +12,16 @@ import android.util.Log
 class MainActivity : FlutterActivity() {
 	private val CHANNEL = "orag"
 	private val STREAM_CHANNEL = "orag_stream"
+	private val INIT_CHANNEL = "orag_init_progress"
 
 	@Volatile
 	private var apiModule: PyObject? = null
 
 	@Volatile
 	private var streamSink: EventChannel.EventSink? = null
+
+	@Volatile
+	private var initSink: EventChannel.EventSink? = null
 
 	/**
 	 * Called from Python (via Chaquopy invoke) for each generated token.
@@ -26,6 +30,16 @@ class MainActivity : FlutterActivity() {
 	fun onStreamToken(token: String) {
 		runOnUiThread {
 			streamSink?.success(token)
+		}
+	}
+
+	/**
+	 * Called from Python (via Chaquopy invoke) for init progress events.
+	 * Forwards JSON string to the Flutter init EventChannel sink.
+	 */
+	fun onInitProgress(jsonData: String) {
+		runOnUiThread {
+			initSink?.success(jsonData)
 		}
 	}
 
@@ -72,6 +86,19 @@ class MainActivity : FlutterActivity() {
 				}
 			})
 
+		// --- EventChannel for init progress ---
+		EventChannel(flutterEngine.dartExecutor.binaryMessenger, INIT_CHANNEL)
+			.setStreamHandler(object : EventChannel.StreamHandler {
+				override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+					initSink = events
+					Log.d("ORAG", "Init progress listener attached")
+				}
+				override fun onCancel(arguments: Any?) {
+					initSink = null
+					Log.d("ORAG", "Init progress listener cancelled")
+				}
+			})
+
 		// --- MethodChannel for RPC calls ---
 		MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
 			.setMethodCallHandler { call, result ->
@@ -80,16 +107,55 @@ class MainActivity : FlutterActivity() {
 
 					Thread {
 						try {
-							ensureApiModule().callAttr("init_with_path", modelPath)
+							val api = ensureApiModule()
+
+							// Use init_with_progress which pushes events via onInitProgress
+							api.callAttr(
+								"init_with_progress",
+								modelPath,
+								this@MainActivity::onInitProgress
+							)
+
 							runOnUiThread {
 								result.success(true)
 							}
 							Log.i("ORAG", "Python init completed: $modelPath")
 						} catch (e: Exception) {
+							// Emit error via init channel too
+							val errorJson = """{"state":"error","progress":1.0,"message":"${e.message?.replace("\"", "\\\"") ?: "Unknown error"}"}"""
 							runOnUiThread {
+								initSink?.success(errorJson)
 								result.error("ERROR", e.message, null)
 							}
 							Log.e("ORAG", "Python init failed", e)
+						}
+					}.start()
+
+				} else if (call.method == "getStatus") {
+					Thread {
+						try {
+							val api = ensureApiModule()
+							val statusObj = api.callAttr("get_status")
+
+							// Convert Python dict to Kotlin Map
+							val statusMap = HashMap<String, Any?>()
+							val pyDict = statusObj.asMap()
+							for ((key, value) in pyDict) {
+								val k = key.toString()
+								when (k) {
+									"state" -> statusMap[k] = value.toString()
+									"progress" -> statusMap[k] = value.toDouble()
+									"message" -> statusMap[k] = value.toString()
+								}
+							}
+
+							runOnUiThread {
+								result.success(statusMap)
+							}
+						} catch (e: Exception) {
+							runOnUiThread {
+								result.error("ERROR", e.message, null)
+							}
 						}
 					}.start()
 
