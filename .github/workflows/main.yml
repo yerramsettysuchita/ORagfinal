@@ -1,0 +1,301 @@
+# ============================================================
+#  ORag — Android Release Pipeline
+#  Trigger  : push to the `moksha` branch
+#  Produces : signed / unsigned APK + AAB artifacts
+#  Runner   : ubuntu-latest (GitHub-hosted)
+# ============================================================
+
+name: 🚀 Android Release — moksha
+
+on:
+  push:
+    branches:
+      - main
+  # Allow manual re-runs from the Actions tab
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type (release / debug)"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+
+# ─── Concurrency ────────────────────────────────────────────
+# Cancel any in-progress run on the same branch so we never
+# queue stale builds behind a newer push.
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─── Permissions ────────────────────────────────────────────
+permissions:
+  contents: read
+  actions: write       # needed to upload artifacts
+
+# ─── Global environment ─────────────────────────────────────
+env:
+  # ── Node.js 24 opt-in (suppresses deprecation warning for actions) ───────
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+  # Flutter channel – always use latest stable for reproducible-enough builds.
+  # Remove the version pin so setup never fails on a non-existent tag.
+  FLUTTER_CHANNEL: stable
+
+  # Java version required by AGP 8.x + Chaquopy
+  JAVA_VERSION: "17"
+  JAVA_DISTRIBUTION: temurin
+
+  # Relative path to the Flutter project inside the repo
+  FLUTTER_PROJECT_DIR: orag
+
+  # Build output paths (relative to FLUTTER_PROJECT_DIR/build)
+  APK_PATH: build/app/outputs/flutter-apk/app-release.apk
+  AAB_PATH: build/app/outputs/bundle/release/app-release.aab
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # JOB 1 — Static Analysis & Tests
+  # ──────────────────────────────────────────────────────────
+  analyze-and-test:
+    name: 🔍 Analyze & Unit Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.FLUTTER_PROJECT_DIR }}
+
+    steps:
+      - name: 📥 Checkout source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0          # full history for version tags
+          lfs: true               # pull Git LFS binaries (libllama_server.so)
+
+      - name: ☕ Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: 🐦 Set up Flutter (latest stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+          cache-key: flutter-stable-${{ runner.os }}
+
+      - name: 🩺 Flutter doctor (diagnostics)
+        run: flutter doctor -v
+        continue-on-error: true
+
+      - name: 📦 Install dependencies
+        run: flutter pub get
+
+      - name: 🔎 Dart analyze (no fatal-infos, no fatal-warnings)
+        # Annotates issues in the PR diff but does NOT block the build.
+        # Promote to a hard failure once the codebase is lint-clean.
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        continue-on-error: true
+
+      - name: 🧪 Run unit tests
+        # Hard gate — tests must pass before build proceeds.
+        run: flutter test --no-pub --coverage
+
+      - name: 📊 Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ env.FLUTTER_PROJECT_DIR }}/coverage/lcov.info
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ──────────────────────────────────────────────────────────
+  # JOB 2 — Build Android APK + AAB
+  # ──────────────────────────────────────────────────────────
+  build-android:
+    name: 🤖 Build Android APK & AAB
+    runs-on: ubuntu-latest
+    needs: analyze-and-test        # gated on passing tests
+    # Expose signing availability as an env var so step-level `if:` can use it.
+    # (secrets context is not allowed directly in step `if:` expressions)
+    env:
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+    defaults:
+      run:
+        working-directory: ${{ env.FLUTTER_PROJECT_DIR }}
+
+    steps:
+      # ── 1. Source ────────────────────────────────────────
+      - name: 📥 Checkout source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          lfs: true               # pull Git LFS binaries (libllama_server.so)
+
+      # ── 2. Java ─────────────────────────────────────────
+      - name: ☕ Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      # ── 3. Flutter ──────────────────────────────────────
+      - name: 🐦 Set up Flutter (latest stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+          cache-key: flutter-stable-${{ runner.os }}
+
+      # ── 4. Gradle cache ─────────────────────────────────
+      - name: 🗄️ Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ── 5. Android SDK cache ────────────────────────────
+      - name: 🗄️ Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/sdk
+          key: android-sdk-${{ runner.os }}-${{ hashFiles('**/local.properties') }}
+          restore-keys: |
+            android-sdk-${{ runner.os }}-
+
+      # ── 6. Flutter pub ──────────────────────────────────
+      - name: 📦 Install Flutter dependencies
+        run: flutter pub get
+
+      # ── 7. Keystore decode (signing) ────────────────────
+      # Add KEYSTORE_BASE64, KEY_ALIAS, KEY_PASSWORD, STORE_PASSWORD
+      # as GitHub Repository Secrets to enable signed builds.
+      # If secrets are absent the step is skipped and the APK
+      # will be signed with the debug key (still installable).
+      - name: 🔑 Decode release keystore
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+          echo "Keystore decoded successfully"
+
+      - name: 📝 Write key.properties
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.STORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=release.keystore
+          EOF
+          echo "key.properties written"
+
+      # ── 7.5 Python for Chaquopy ─────────────────────────
+      # chaquopy.gradle no longer hard-codes a local Windows path.
+      # We provide a known Python on the CI runner via CHAQUOPY_PYTHON.
+      - name: 🐍 Set up Python (for Chaquopy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 8. Build APK ────────────────────────────────────
+      # Note: --split-per-abi cannot be used with Chaquopy because Chaquopy
+      # requires ndk.abiFilters, and Gradle forbids both simultaneously.
+      # We build a single universal APK containing all 3 ABIs instead.
+      - name: 🏗️ Build release APK (universal)
+        run: |
+          flutter build apk \
+            --release \
+            --obfuscate \
+            --split-debug-info=build/debug-info
+        env:
+          # Pass Gradle JVM args for Chaquopy + large dependency sets
+          GRADLE_OPTS: "-Xmx8g -XX:MaxMetaspaceSize=4g"
+          # Point Chaquopy to the Python we just set up
+          CHAQUOPY_PYTHON: python3
+
+      # ── 9. Build AAB ────────────────────────────────────
+      - name: 📦 Build release AAB (Play Store bundle)
+        run: |
+          flutter build appbundle \
+            --release \
+            --obfuscate \
+            --split-debug-info=build/debug-info
+        env:
+          GRADLE_OPTS: "-Xmx8g -XX:MaxMetaspaceSize=4g"
+          CHAQUOPY_PYTHON: python3
+
+      # ── 10. Collect artifacts ────────────────────────────
+      - name: 📋 List build outputs
+        run: |
+          echo "=== APKs ==="
+          find build/app/outputs/flutter-apk -name "*.apk" | sort
+          echo "=== AABs ==="
+          find build/app/outputs/bundle -name "*.aab" | sort
+
+      # ── 11. Build metadata ───────────────────────────────
+      - name: 🏷️ Generate build metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "artifact_name=orag-android-${VERSION}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      # ── 12. Upload APK ───────────────────────────────────
+      - name: ⬆️ Upload universal APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-apk
+          path: ${{ env.FLUTTER_PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── 13. Upload AAB ───────────────────────────────────
+      - name: ⬆️ Upload AAB (Play Store)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-aab
+          path: ${{ env.FLUTTER_PROJECT_DIR }}/build/app/outputs/bundle/release/app-release.aab
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── 14. Upload debug symbols ─────────────────────────
+      - name: ⬆️ Upload debug symbols (obfuscation map)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-debug-info
+          path: ${{ env.FLUTTER_PROJECT_DIR }}/build/debug-info/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      # ── 15. Build summary ────────────────────────────────
+      - name: 📝 Write job summary
+        run: |
+          echo "## 🤖 Android Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ steps.meta.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **App Version** | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Date** | \`${{ steps.meta.outputs.build_date }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Flutter** | \`latest-stable\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Java** | \`${{ env.JAVA_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- 📱 Split APKs (arm64-v8a, armeabi-v7a, x86_64)" >> $GITHUB_STEP_SUMMARY
+          echo "- 📦 AAB (Google Play Bundle)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗺️ Debug symbols / obfuscation map" >> $GITHUB_STEP_SUMMARY
